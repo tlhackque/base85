@@ -1,0 +1,282 @@
+#! /usr/bin/perl
+
+# Copyright (C) 2017 Timothe Litt litt at acm dot org
+
+use warnings;
+use strict;
+
+# Note: Convert::Ascii85::XS exists, but has a different API
+use Convert::Ascii85( qw/ascii85_decode ascii85_encode/ );
+
+use Getopt::Long qw/2.48 :config bundling/;
+
+my $VERSION = '1.0';
+
+sub usage;
+
+my $decode;
+my $output = '-';
+my $prefix = '';
+my $wid    = 80;
+my $opt    = { compress_zero => 1, compress_space => 1 };
+
+# Parse switches
+
+GetOptions(
+    'no-compression|C' => sub { $opt = { compress_zero  => 0,
+                                         compress_space => 0 }; },
+    'standard|s'       => sub { $opt->{compress_space} = 0; },
+    'decode|d'         => \$decode,
+    'output|o=s'       => \$output,
+    'prefix|p'         => sub { $prefix = ' '; },
+    'wrap|w=o'         => sub {
+        my( $nam, $val ) = @_;
+        die( "$nam: value may not be negative\n" )
+            if( $val < 0 );
+        $wid = $val ? ( $val - ( $val % 5 ) ) || 5 : 0; },
+    '-no-wrap|W'       => sub { $wid = 0; },
+    '--version|v'      => sub {
+        print( "base85 V$VERSION, Convert::Ascii85 version ",
+               "$Convert::Ascii85::VERSION\n" );
+        exit; },
+    '--help|h|?'       => sub { usage( 1 ); },
+    '--man|m'          => sub { usage( 2 ); },
+ ) or
+    usage( 0 );
+
+$SIG{__DIE__} = sub {
+    my $txt = join( '', @_ );
+    $txt =~ s/^(.*?) at .*? line \d+\.$/$1/;
+    die( "$txt" );
+};
+$SIG{__WARN__} = sub { die( @_ ); };
+
+# Default to STDIN if no file specified
+
+@ARGV = ( qw/-/ ) unless( @ARGV );
+
+# Handle --output
+
+if( $output ne '-' ) {
+    close STDOUT;
+    open( STDOUT, '>', $output ) or do {
+        print STDERR ( "$output: $!\n" );
+        exit( 1 );
+    };
+}
+
+my $line = '';
+
+if( $decode ) {
+    binmode STDOUT, ':raw';
+
+    # Expands any compression so decode doesn't introduce padding.
+
+    while( <> ) {
+        tr{!"#$%&'()*+,\-./0-9:;<=>?@A-Z[\\]^_`a-uyz}//cd;
+        s/y/+<VdL/g;
+        s/z/!!!!!/g;
+        $line .= $_;
+        my $len = length $line;
+        next unless( $len >= 5 );
+
+        if( ( my $rem = $len % 5 ) == 0 ) {
+            print( ascii85_decode( $line ) ) or
+                die( "print: $!\n" );
+            $line = '';
+        } else {
+            print( ascii85_decode( substr( $line, 0, -$rem, '' ) ) ) or
+                die( "print: $!\n" );
+        }
+    }
+    print( ascii85_decode( $line ) ) or
+        die( "print: $!\n" )
+        if( length $line );
+    exit;
+}
+
+# Encode
+#
+#  Generate lines of width $wid cols, which is a multiple of 5 characters.
+#  (If $wid == 0, there is no whitespace in the output.)
+
+my $data = '';
+my $full = $wid ? ( $wid / 5 ) : ( 5000 / 5 );  # Length of full line/chunk
+my $read = $full * 4 * 10;                      # Groups/line * 10 line chunks
+$read = 8192 if( $read < 8192 );                # Minimum chunck size
+$/ = \$read;
+
+foreach my $file ( @ARGV ) {
+    my $fh;
+    if( $file eq '-' ) {
+        $fh = \*STDIN;
+    } else {
+        open( $fh, '<', $file ) or
+          die( "$file: $!\n" );
+    }
+    binmode $fh, ':raw';
+
+    while( <$fh> ) {
+        $data .= $_;
+
+        my $len = length $data;
+        next unless( $len && ( $len / 4 >= $full ) );
+
+        if( ( my $rem = $len % 4 ) == 0 ) {
+            $line .= ascii85_encode( $data, $opt );
+            $data = '';
+        } else {
+            $line .= ascii85_encode( substr( $data, 0, -$rem, '' ), $opt );
+        }
+
+        if( $wid ) {
+            print( $prefix, substr( $line, 0, $wid, '' ), "\n" ) or
+                die( "print: $!\n" )
+                while( length( $line ) >= $wid );
+        } else {
+            print( $line ) or
+                die( "print: $!\n" );
+            $line = '';
+        }
+    }
+    if( $file ne '-' ) {
+        close( $fh ) or die( "$file: $!\n" );
+    }
+}
+
+$line .= ascii85_encode( $data, $opt ) if( length $data );
+exit unless( length $line );
+
+if( $wid ) {
+    print( $prefix, substr( $line, 0, $wid, '' ), "\n" ) or
+        die( "print: $!\n" )
+        while( length( $line ) >= $wid );
+    print( $prefix, $line, "\n" ) or
+        die( "print: $!\n" )
+        if( length $line );
+} else {
+    print( $line ) or
+        die( "print: $!\n" );
+}
+exit;
+
+sub usage {
+    no warnings 'once';
+    $Pod::Usage::Formatter = 'Pod::Text::Termcap';
+    require Pod::Usage;
+    Pod::Usage::pod2usage( -noperldoc => 1, -input => \*DATA,
+                           -verbose   => @_ );
+}
+
+__END__
+
+=pod
+
+=head1 NAME
+
+base85 - ASCII85 encode/decode data and print to standard output
+
+=head1 SYNOPSIS
+
+B<base85> [OPTION] [FILE] ...
+
+    -w COLS  --wrap=COLS    -p --prefix  -C      --no-compression
+    -s       --standard     -d --decode  -o FILE --output=FILE
+    -h       --help         -m --man     -v      --version
+
+=head1 DESCRIPTION
+
+B<base85> - encode or decode FILE, or standard intput, to standard output.
+
+With no FILE, or when FILE is F<->, read standard input.
+
+Multiple FILEs, are concatenated.
+
+The data are encoded using ASCII85 (also known as base85).  This
+encoding uses ASCII 33 through 117 to encode groups of 4 bytes into
+5 printable characters.
+
+This encoding is similar to Base64, but more space efficient.  The
+encoding overhead is 25% (v.s. 33% for Base64).
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-w> I<COLS>, B<--wrap>=I<COLS>, B<-W>
+
+Wrap encoded lines after I<COLS> characters (default 80).  Use 0  or -W to
+disable line wrapping.  Will be forced to a multiple of 5.  I<COLS> is
+interpreted as hex if prefixed by 0x; binary if prefixed by 0b; octal
+if prefixed by 0; otherwise (and normally) decimal.
+
+Wrapping is useful if the output is being transmitted by a line-length
+limited means (e.g. e-mail), but it may reduce the effectiveness of
+compression.
+
+=item B<-p>, B<--prefix>
+
+When wrapping, prefix encoded lines with a single space.
+
+Prefixing is useful when encoded text needs to be distinguished from
+identifying information.  Note that space is not an ASCII85 symbol,
+and is ignored when decoding.
+
+=item B<-C>, B<--no-compression>
+
+Do not compress multiple zeroes or spaces to 'z' or 'y'.  Use when the
+receiver doesn't understand these extensions.
+
+=item B<-s>, B<--standard>
+
+Do not compress multiple spaces to 'y'.  Use when the receiver doesn't
+understand this extension.
+
+=item B<-d>, B<--decode>
+
+Decode data.  Wrapping and compression are automatically detected and
+handled.  Invalid characters are ignored.
+
+=item B<-o> I<FILE>, B<--output>=I<FILE>
+
+Write output to I<FILE> rather than standard output.
+
+=item B<-h>, B<--help>
+
+Display summary help and exit.
+
+=item B<-m>, B<--man>
+
+Display full help (manual page) and exit.
+
+=item B<-v>, B<--version>
+
+Display version and exit.
+
+=item B<-->
+
+End of options (e.g. if you have a file name starting with B<->).
+
+=back
+
+=head1 NOTES
+
+When encoding, the input FILE(s) are read in binary mode.
+
+When decoding, F<stdout> is written in binary mode.
+
+=head1 AUTHOR
+
+Timothe Litt E<lt>litt@acm.orgE<gt>
+
+=head1 COPYRIGHT and LICENSE
+
+Copyright (c) 2017 Timothe Litt
+
+This is free software, licensed under the terms of the Perl artistic license.
+
+=head1 SEE ALSO
+
+L<Convert::Ascii85>, L<MIME::Base64>, L<base64>
+
+=cut
